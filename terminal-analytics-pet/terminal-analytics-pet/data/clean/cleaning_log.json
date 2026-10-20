@@ -1,0 +1,23 @@
+{
+  "transactions_raw": 696,
+  "txn_duplicates_removed": 6,
+  "txn_time_missing_quarantined": 14,
+  "txn_typos_fixed": 5,
+  "txn_amount_null_removed": 14,
+  "txn_amount_negative_quarantined": 7,
+  "transactions_clean": 655,
+  "devices_raw": 41,
+  "device_duplicates_removed": 1,
+  "cash_level_out_of_range": 2,
+  "devices_clean": 40,
+  "maint_raw": 30,
+  "maint_time_anomalies": 2,
+  "maint_orphan_devices": 2,
+  "maint_clean": 28,
+  "anomaly_devices": 6,
+  "anomaly_by_reason": {
+    "норма": 34,
+    "онлайн, но нет подключения > 3 дней": 3,
+    "онлайн, но нет ни одной транзакции": 3
+  }
+}

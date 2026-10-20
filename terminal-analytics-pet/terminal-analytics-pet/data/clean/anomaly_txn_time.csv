@@ -1,0 +1,15 @@
+txn_id,device_id,txn_time,txn_type,amount,status,error_code
+T000095,ATM-019,,снятие,7000,success,
+T000165,ATM-032,,перевод,2000,success,
+T000245,ATM-013,,перевод,2000,success,
+T000260,ATM-003,,запрос баланса,0,success,
+T000338,ATM-034,,снятие,1500,timeout,
+T000359,ATM-020,,внесение,5000,success,
+T000417,ATM-037,,снятие,1500,success,
+T000453,ATM-004,,внесение,1500,success,
+T000462,ATM-027,,внесение,10000,success,
+T000564,ATM-024,,запрос баланса,0,success,
+T000619,ATM-028,,перевод,10000,success,
+T000653,ATM-037,,снятие,500,failed,E01
+T000661,ATM-008,,запрос баланса,0,success,
+T000675,ATM-008,,перевод,15000,success,

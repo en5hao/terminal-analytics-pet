@@ -1,0 +1,5 @@
+-- Импорт очищенных CSV (выполнять из корня репозитория: psql -d terminal_analytics -f sql/load.sql)
+\copy devices(device_id,location,model,last_online,status,cash_level) FROM 'data/clean/device_status_clean.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8')
+\copy transactions(txn_id,device_id,txn_time,txn_type,amount,status,error_code) FROM 'data/clean/transactions_clean.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8')
+\copy maintenance(ticket_id,device_id,fault_time,dispatch_time,resolve_time,fault_type) FROM 'data/clean/maintenance_clean.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8')
+\copy anomaly_maintenance(ticket_id,device_id,fault_time,dispatch_time,resolve_time,fault_type,device_known,anomaly_reason) FROM 'data/clean/anomaly_maintenance.csv' WITH (FORMAT csv, HEADER true, ENCODING 'UTF8')

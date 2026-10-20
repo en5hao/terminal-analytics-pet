@@ -1,0 +1,166 @@
+ОЧИСТКА И ОБЪЕДИНЕНИЕ В POWER QUERY — пошаговое описание и код на языке M
+=========================================================================
+Excel → Данные → Получить данные → Из текста/CSV (кодировка UTF-8, 65001) или Power BI Desktop → Получить данные → Текст/CSV.
+Для каждого запроса: «Главная» → «Расширенный редактор» → вставить код ниже. Пути к файлам замените на свои.
+Результат воспроизводится скриптом scripts/clean_data.py — числа должны совпасть (см. data/clean/cleaning_log.json).
+
+Порядок запросов: параметры → *_raw → transactions_stage → transactions_clean / anomaly_amount → device_status_clean
+→ maintenance_clean / anomaly_maintenance → device_consistency.
+Все *_raw и transactions_stage — «Только создать подключение» (не загружать в модель).
+
+
+------------------------------------------------------------------
+0. Параметры (создать как пустые запросы)
+------------------------------------------------------------------
+-- SnapshotDate  (момент выгрузки всех трёх систем; ЗАМЕНЯЕТ DateTime.LocalNow(), см. ниже)
+#datetime(2026, 9, 30, 23, 59, 59)
+
+-- StaleDays
+3
+
+ПОЧЕМУ НЕ DateTime.LocalNow(): данные относятся к сентябрю 2026. Если сравнивать с «сейчас»,
+то результат зависит от дня запуска: через месяц ВСЕ устройства станут «не на связи > 3 дней».
+Сравнивать нужно с моментом выгрузки данных.
+
+
+------------------------------------------------------------------
+1. Сырые таблицы (одинаково для трёх файлов; пример — transactions_raw)
+------------------------------------------------------------------
+let
+    Source   = Csv.Document(File.Contents("C:\terminal-analytics-pet\data\raw\transactions.csv"),
+                            [Delimiter = ",", Encoding = 65001, QuoteStyle = QuoteStyle.Csv]),
+    Promoted = Table.PromoteHeaders(Source, [PromoteAllScalars = true])
+in
+    Promoted
+-- device_status_raw и maintenance_raw — то же самое, меняется только имя файла.
+
+
+------------------------------------------------------------------
+2.1 transactions_stage → transactions_clean, anomaly_amount
+------------------------------------------------------------------
+-- transactions_stage
+let
+    Source      = transactions_raw,
+    // 1) дубликаты по txn_id (в сырых данных 6 полных дублей строк)
+    Dedup       = Table.Distinct(Source, {"txn_id"}),
+    // 2) txn_time: два формата — 2026-09-01 08:23:11 и 2026/9/1 8:23; пустое/нераспознанное -> null
+    TimeParsed  = Table.TransformColumns(Dedup,
+                    {{"txn_time", each try DateTime.From(Text.Trim(_), "en-US") otherwise null, type nullable datetime}}),
+    // 3) строки без времени вынести (14 шт.): их нельзя отнести ни к дню, ни к периоду
+    HasTime     = Table.SelectRows(TimeParsed, each [txn_time] <> null),
+    // 4) опечатки txn_type: «снятиее» -> «снятие»
+    TypeFixed   = Table.ReplaceValue(HasTime, "снятиее", "снятие", Replacer.ReplaceValue, {"txn_type"}),
+    // 5) amount -> число
+    AmountNum   = Table.TransformColumns(TypeFixed,
+                    {{"amount", each try Number.From(_, "en-US") otherwise null, type nullable number}}),
+    // 6) amount = null — исключить как неполные записи
+    NoNullAmt   = Table.SelectRows(AmountNum, each [amount] <> null)
+in
+    NoNullAmt
+
+-- transactions_clean
+let
+    Source = transactions_stage
+in
+    Table.SelectRows(Source, each [amount] >= 0)
+
+-- anomaly_amount   (отрицательные суммы — для отчёта, в модель не идут)
+let
+    Source = transactions_stage
+in
+    Table.SelectRows(Source, each [amount] < 0)
+
+
+------------------------------------------------------------------
+2.2 device_status_clean
+------------------------------------------------------------------
+let
+    Source  = device_status_raw,
+    Dedup   = Table.Distinct(Source, {"device_id"}),                           // 1 дубль строки
+    Typed   = Table.TransformColumns(Dedup, {
+                 {"last_online", each DateTime.From(_, "en-US"), type datetime},
+                 {"cash_level",  each try Number.From(_, "en-US") otherwise null, type nullable number}}),
+    Flagged = Table.AddColumn(Typed, "cash_level_anomaly",
+                 each [cash_level] <> null and ([cash_level] < 0 or [cash_level] > 100), type logical),
+    // остаток вне 0–100 -> null (аномалия сохранена в флаге)
+    Fixed   = Table.ReplaceValue(Flagged, each [cash_level],
+                 each if [cash_level_anomaly] then null else [cash_level], Replacer.ReplaceValue, {"cash_level"})
+in
+    Fixed
+
+
+------------------------------------------------------------------
+2.3 maintenance_clean, anomaly_maintenance
+------------------------------------------------------------------
+-- maintenance_stage
+let
+    Source = maintenance_raw,
+    Typed  = Table.TransformColumns(Source, {
+                {"fault_time",    each DateTime.From(_, "en-US"), type datetime},
+                {"dispatch_time", each DateTime.From(_, "en-US"), type datetime},
+                {"resolve_time",  each DateTime.From(_, "en-US"), type datetime}}),
+    // пометка заявок на несуществующие устройства (проверка по device_status_clean)
+    Known  = Table.AddColumn(Typed, "device_known",
+                each List.Contains(device_status_clean[device_id], [device_id]), type logical),
+    Reason = Table.AddColumn(Known, "anomaly_reason",
+                each if not [device_known] then "несуществующий device_id"
+                     else if [resolve_time] < [dispatch_time] then "resolve_time раньше dispatch_time"
+                     else "", type text)
+in
+    Reason
+
+-- maintenance_clean   (временные аномалии вынесены; «сироты» остаются, но помечены; в БД они ловятся LEFT JOIN-ом)
+let
+    Source = maintenance_stage,
+    Rows   = Table.SelectRows(Source, each [resolve_time] >= [dispatch_time]),
+    Result = Table.RemoveColumns(Rows, {"anomaly_reason"})
+in
+    Result
+
+-- anomaly_maintenance
+let
+    Source = maintenance_stage
+in
+    Table.SelectRows(Source, each [anomaly_reason] <> "")
+
+
+------------------------------------------------------------------
+2.4 device_consistency — ключевой запрос (расхождения между системами)
+------------------------------------------------------------------
+let
+    // Сначала сворачиваем транзакции до ОДНОЙ строки на устройство.
+    // Если соединять «как есть», каждое устройство размножится на N строк по числу транзакций.
+    TxnAgg   = Table.Group(transactions_clean, {"device_id"}, {
+                  {"txn_count",     each Table.RowCount(_),  Int64.Type},
+                  {"last_txn_time", each List.Max([txn_time]), type nullable datetime}}),
+    // Левое внешнее соединение: все устройства мониторинга сохраняются, даже без транзакций
+    Joined   = Table.NestedJoin(device_status_clean, {"device_id"}, TxnAgg, {"device_id"}, "t", JoinKind.LeftOuter),
+    Expanded = Table.ExpandTableColumn(Joined, "t", {"txn_count", "last_txn_time"}),
+    NoNull   = Table.ReplaceValue(Expanded, null, 0, Replacer.ReplaceValue, {"txn_count"}),
+    Stale    = #duration(StaleDays, 0, 0, 0),
+    Reason   = Table.AddColumn(NoNull, "anomaly_reason", each
+                  if [status] <> "online" then "норма"
+                  else if [last_online] < SnapshotDate - Stale then "онлайн, но нет подключения > 3 дней"
+                  else if [txn_count] = 0 then "онлайн, но нет ни одной транзакции"
+                  else if [last_txn_time] < SnapshotDate - Stale then "онлайн, но нет транзакций > 3 дней"
+                  else "норма", type text)
+in
+    Reason
+
+
+------------------------------------------------------------------
+2.5 Выгрузка
+------------------------------------------------------------------
+Excel: «Закрыть и загрузить в…» → Таблица (transactions_clean, device_status_clean, maintenance_clean, device_consistency).
+Power BI: «Закрыть и применить». Экспорт в CSV (data/clean/): правой кнопкой по таблице в Excel → «Экспорт» → CSV UTF-8,
+либо готовые файлы из data/clean/ (получены scripts/clean_data.py).
+
+
+------------------------------------------------------------------
+Ожидаемые числа (контрольные суммы)
+------------------------------------------------------------------
+transactions_raw 696 → дубли −6 → без времени −14 → без суммы −14 → отрицательные −7 → transactions_clean 655
+опечаток «снятиее» исправлено: 5
+device_status_raw 41 → дубль −1 → 40; остаток вне 0–100: 2 устройства (ATM-021, ATM-035) → null
+maintenance_raw 30 → временные аномалии (вынесены): 2 (M0012, M0018); заявки на несуществующие устройства (помечены): 2 (M0005, M0023)
+device_consistency: 40 строк; аномальных 6 (3 «нет подключения > 3 дней», 3 «нет ни одной транзакции»)

@@ -1,0 +1,32 @@
+// Меры Power BI (таблица _measures). Меры написаны под модель из powerbi/BUILD_GUIDE.md.
+
+Total Txns =
+COUNTROWS ( transactions )
+
+Success Txns =
+CALCULATE ( COUNTROWS ( transactions ), transactions[status] = "success" )
+
+Success Rate =
+DIVIDE ( [Success Txns], [Total Txns] )
+
+Error Txns =                       // failed + timeout (всё, что не success) — для топ-5 проблемных устройств
+CALCULATE ( COUNTROWS ( transactions ), transactions[status] <> "success" )
+
+Error Rate =
+DIVIDE ( [Error Txns], [Total Txns] )
+
+// MTTR: часы от fault_time до resolve_time.
+// 1) DATEDIFF(..., HOUR) считает ГРАНИЦЫ часов (10:59→11:01 = 1 ч) — поэтому считаем в минутах и делим на 60.
+// 2) Заявки на несуществующие устройства (нет связи с devices) исключены — иначе при срезе по модели и без среза цифра разная.
+MTTR Hours =
+AVERAGEX (
+    FILTER ( maintenance, NOT ISBLANK ( RELATED ( devices[device_id] ) ) ),
+    DIVIDE ( DATEDIFF ( maintenance[fault_time], maintenance[resolve_time], MINUTE ), 60 )
+)
+
+Anomaly Devices =
+CALCULATE ( COUNTROWS ( device_consistency ), device_consistency[anomaly_reason] <> "норма" )
+// Требует связи devices[device_id] 1—1 device_consistency[device_id] (иначе срезы model/location на неё не действуют)
+
+// Для drill-through «Заявки устройства»: MTTR одной заявки (вычисляемый столбец в maintenance)
+// Ticket MTTR Hours = DIVIDE ( DATEDIFF ( maintenance[fault_time], maintenance[resolve_time], MINUTE ), 60 )
